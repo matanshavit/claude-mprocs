@@ -1,0 +1,19 @@
+# Claude Code mprocs configuration
+# Edit this file to define your Claude Code instances.
+# Then run: cm start
+#
+# Or use the CLI instead: cm s frontend:~/dev/frontend backend:~/dev/backend
+
+server: 127.0.0.1:4050
+
+procs:
+  # Example instances (uncomment/edit as needed):
+  #
+  # frontend:
+  #   shell: "cl ~/dev/frontend"
+  #
+  # backend:
+  #   shell: "cl ~/dev/backend"
+  #
+  # api:
+  #   shell: "cl ~/dev/api"

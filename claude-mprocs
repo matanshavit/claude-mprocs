@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SESSION="claude-mprocs"
+CONFIG_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_FILE="$CONFIG_DIR/mprocs.yaml"
+SERVER="127.0.0.1:4050"
+
+usage() {
+  cat <<EOF
+Usage: claude-mprocs <command> [args...]
+
+Commands (shorthands in parens):
+  install                  Add cm, cl, cly to your shell PATH.
+  start (s) [name:dir ..]  Start tmux session with mprocs.
+                           -y  bypass permissions for all instances.
+                           -a  auto-attach after starting.
+  add <name> [dir] [-y]   Add a new Claude instance to running mprocs.
+  remove (rm) <index>     Kill a process by index (0-based, top is 0).
+                         Use 'd' in mprocs TUI to remove from the list.
+  attach (a)              Attach to the running tmux session.
+  status (st)             Show if the session is running.
+  stop (q)                Stop the tmux session and all Claude instances.
+  restart (r) [name:dir]  Stop and re-start with new config.
+  clean                   Kill orphaned mprocs processes and clean temp configs.
+  config                  Open the mprocs.yaml config in \$EDITOR.
+  ctl <yaml>              Send a raw mprocs ctl command.
+
+Examples:
+  cm install
+  cm s main:~/dev fe:~/dev/workforce-one-fe
+  cm s main:~/dev -y -a
+  cm add annotations ~/dev/annotations -y
+  cm a
+  cm q
+EOF
+}
+
+cmd_install() {
+  # Detect shell rc file
+  local rc_file
+  case "$(basename "${SHELL:-/bin/bash}")" in
+    zsh)  rc_file="$HOME/.zshrc" ;;
+    bash)
+      if [ -f "$HOME/.bash_profile" ]; then
+        rc_file="$HOME/.bash_profile"
+      else
+        rc_file="$HOME/.bashrc"
+      fi
+      ;;
+    *)    rc_file="$HOME/.profile" ;;
+  esac
+
+  # Check if already installed (look for this exact directory in PATH)
+  if grep -qF "$CONFIG_DIR" "$rc_file" 2>/dev/null; then
+    echo "PATH already configured in $rc_file"
+  else
+    echo "" >> "$rc_file"
+    echo "# claude-mprocs: cl, cly, cm, claude-mprocs" >> "$rc_file"
+    echo "export PATH=\"$CONFIG_DIR:\$PATH\"" >> "$rc_file"
+    echo "Added PATH to $rc_file"
+  fi
+
+  # Verify scripts are executable
+  chmod +x "$CONFIG_DIR/claude-mprocs" "$CONFIG_DIR/cl"
+  # Ensure symlinks exist
+  ln -sf "$CONFIG_DIR/cl" "$CONFIG_DIR/cly"
+  ln -sf "$CONFIG_DIR/claude-mprocs" "$CONFIG_DIR/cm"
+
+  echo ""
+  echo "Installed. Restart your shell or run:"
+  echo "  source $rc_file"
+  echo ""
+  echo "Available commands:"
+  echo "  claude-mprocs (or cm)  - manage mprocs + tmux sessions"
+  echo "  cl [dir]               - launch claude in a directory"
+  echo "  cl -y [dir]            - launch claude with --dangerously-skip-permissions"
+  echo "  cly [dir]              - same as cl -y"
+}
+
+generate_config() {
+  local bypass_permissions=false
+  local specs=()
+
+  # Separate specs from flags
+  for arg in "$@"; do
+    case "$arg" in
+      -y) bypass_permissions=true ;;
+      *)  specs+=("$arg") ;;
+    esac
+  done
+
+  local tmpfile
+  tmpfile=$(mktemp "/tmp/claude-mprocs-XXXXXX")
+  mv "$tmpfile" "$tmpfile.yaml"
+  tmpfile="$tmpfile.yaml"
+
+  cat > "$tmpfile" <<HEADER
+server: $SERVER
+procs:
+HEADER
+
+  local launcher="cl"
+  if $bypass_permissions; then
+    launcher="cly"
+  fi
+
+  for spec in "${specs[@]}"; do
+    local name="${spec%%:*}"
+    local dir="${spec#*:}"
+    # Resolve relative paths and ~
+    dir="${dir/#\~/$HOME}"
+    dir="$(cd "$dir" 2>/dev/null && pwd || echo "$dir")"
+    cat >> "$tmpfile" <<ENTRY
+  $name:
+    shell: "$launcher $dir"
+ENTRY
+  done
+  echo "$tmpfile"
+}
+
+cmd_start() {
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "Session '$SESSION' already running. Use 'attach' or 'stop' first."
+    exit 1
+  fi
+
+  # Extract -a/--attach flag, pass the rest through
+  local auto_attach=false
+  local pass_through=()
+  for arg in "$@"; do
+    case "$arg" in
+      -a|--attach) auto_attach=true ;;
+      *)           pass_through+=("$arg") ;;
+    esac
+  done
+
+  # Kill any orphaned mprocs holding the server port
+  kill_orphaned_mprocs
+
+  local config
+  if [ ${#pass_through[@]} -gt 0 ]; then
+    config="$(generate_config "${pass_through[@]}")"
+    echo "Generated config: $config"
+  else
+    config="$CONFIG_FILE"
+  fi
+
+  echo "Starting mprocs in tmux session '$SESSION'..."
+  # Clear Claude Code env vars so child instances don't think they're nested.
+  # Temporarily unset from the global tmux server env, then restore after.
+  local had_claudecode had_entrypoint
+  had_claudecode=$(tmux show-environment -g CLAUDECODE 2>/dev/null || true)
+  had_entrypoint=$(tmux show-environment -g CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true)
+
+  tmux set-environment -g -u CLAUDECODE 2>/dev/null || true
+  tmux set-environment -g -u CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
+
+  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
+    tmux new-session -d -s "$SESSION" "mprocs --config '$config'"
+
+  # Restore global env for other sessions
+  if [ -n "$had_claudecode" ]; then
+    tmux set-environment -g CLAUDECODE 1
+  fi
+  if [ -n "$had_entrypoint" ]; then
+    tmux set-environment -g CLAUDE_CODE_ENTRYPOINT cli
+  fi
+  echo "Started. Use 'cm a' or 'tmux attach -t $SESSION' to connect."
+
+  if $auto_attach; then
+    exec tmux attach -t "$SESSION"
+  fi
+}
+
+cmd_add() {
+  local bypass_permissions=false
+  local positional=()
+
+  for arg in "$@"; do
+    case "$arg" in
+      -y) bypass_permissions=true ;;
+      *)  positional+=("$arg") ;;
+    esac
+  done
+
+  local name="${positional[0]:?Usage: claude-mprocs add <name> [dir] [-y]}"
+  local dir="${positional[1]:-$(pwd)}"
+  dir="${dir/#\~/$HOME}"
+  dir="$(cd "$dir" 2>/dev/null && pwd || echo "$dir")"
+
+  local launcher="cl"
+  if $bypass_permissions; then
+    launcher="cly"
+  fi
+
+  mprocs --server "$SERVER" --ctl "{c: add-proc, cmd: \"$launcher '$dir'\", name: \"$name\"}"
+  echo "Added '$name' (cwd: $dir$(if $bypass_permissions; then echo ", bypass permissions"; fi))"
+}
+
+cmd_remove() {
+  local index="${1:?Usage: claude-mprocs remove <index> (0-based, top process is 0)}"
+  mprocs --server "$SERVER" --ctl "{c: select-proc, index: $index}"
+  mprocs --server "$SERVER" --ctl "{c: kill-proc}"
+  echo "Killed process at index $index. Use 'd' in mprocs TUI to remove from list."
+}
+
+cmd_ctl() {
+  mprocs --server "$SERVER" --ctl "$1"
+}
+
+cmd_attach() {
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "No session '$SESSION' running. Use 'start' first."
+    exit 1
+  fi
+  exec tmux attach -t "$SESSION"
+}
+
+cmd_status() {
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "Session '$SESSION' is running."
+    tmux list-panes -t "$SESSION" -F '#{pane_index}: #{pane_current_command} (#{pane_width}x#{pane_height})'
+  else
+    echo "Session '$SESSION' is not running."
+  fi
+}
+
+kill_orphaned_mprocs() {
+  local port="${SERVER##*:}"
+  local pid
+  pid=$(lsof -ti "TCP:$port" -sTCP:LISTEN 2>/dev/null || true)
+  if [ -n "$pid" ]; then
+    echo "Killing orphaned mprocs on port $port (pid $pid)..."
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+  fi
+}
+
+cmd_stop() {
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+    echo "Session '$SESSION' stopped."
+  else
+    echo "No session '$SESSION' to stop."
+  fi
+  # Also kill any orphaned mprocs that survived the session
+  kill_orphaned_mprocs
+}
+
+cmd_clean() {
+  echo "Cleaning up..."
+  # Kill tmux session if it exists
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+    echo "  Killed tmux session '$SESSION'."
+  fi
+  # Kill orphaned mprocs on server port
+  kill_orphaned_mprocs
+  # Remove temp config files
+  local count
+  count=$(find /tmp -name 'claude-mprocs-*' -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$count" -gt 0 ]; then
+    find /tmp -name 'claude-mprocs-*' -type f -delete
+    echo "  Removed $count temp config file(s)."
+  fi
+  echo "Done."
+}
+
+cmd_config() {
+  ${EDITOR:-vim} "$CONFIG_FILE"
+}
+
+cmd_restart() {
+  cmd_stop 2>/dev/null || true
+  sleep 1
+  cmd_start "$@"
+}
+
+case "${1:-}" in
+  install)      cmd_install ;;
+  start|s)      shift; cmd_start "$@" ;;
+  add)          shift; cmd_add "$@" ;;
+  remove|rm)    shift; cmd_remove "$@" ;;
+  ctl)          shift; cmd_ctl "$@" ;;
+  attach|a)     cmd_attach ;;
+  status|st)    cmd_status ;;
+  stop|q)       cmd_stop ;;
+  restart|r)    shift; cmd_restart "$@" ;;
+  clean)        cmd_clean ;;
+  config)       cmd_config ;;
+  -h|--help|help|"") usage ;;
+  *) echo "Unknown command: $1"; usage; exit 1 ;;
+esac
