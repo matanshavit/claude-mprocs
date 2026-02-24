@@ -111,10 +111,14 @@ set -g mouse on
 
 # Enable extended key sequences (better key handling in apps like vim/neovim)
 set -s extended-keys on
+
+# Enable OSC 52 clipboard integration
+set -g set-clipboard on
 ```
 
 - **`mouse on`** — lets you scroll through Claude output history, click to select panes, and drag to resize them — all without keyboard shortcuts
 - **`extended-keys on`** — ensures modifier key combinations (e.g. `Ctrl+Shift+...`) are passed through correctly to programs running inside tmux
+- **`set-clipboard on`** — allows programs inside tmux to copy to your system clipboard via OSC 52
 
 ## Troubleshooting
 
