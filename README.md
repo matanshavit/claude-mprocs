@@ -114,11 +114,27 @@ set -s extended-keys on
 
 # Enable OSC 52 clipboard integration
 set -g set-clipboard on
+
+# Increase scrollback buffer (default 2000 is low for Claude output)
+set -g history-limit 50000
+
+# Remove delay after pressing Escape (important for vim/neovim)
+set -sg escape-time 0
+
+# Let programs detect focus gain/loss
+set -g focus-events on
+
+# Proper 256-color support
+set -g default-terminal "tmux-256color"
 ```
 
 - **`mouse on`** — lets you scroll through Claude output history, click to select panes, and drag to resize them — all without keyboard shortcuts
 - **`extended-keys on`** — ensures modifier key combinations (e.g. `Ctrl+Shift+...`) are passed through correctly to programs running inside tmux
 - **`set-clipboard on`** — allows programs inside tmux to copy to your system clipboard via OSC 52
+- **`history-limit 50000`** — increases scrollback buffer from the default 2000 lines, which fills up fast with Claude output
+- **`escape-time 0`** — removes the delay after pressing Escape, important for vim/neovim users
+- **`focus-events on`** — lets programs like vim detect when they gain/lose focus inside tmux
+- **`default-terminal "tmux-256color"`** — ensures proper 256-color support and fixes color issues in some tools
 
 ## Troubleshooting
 
