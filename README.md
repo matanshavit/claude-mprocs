@@ -101,6 +101,21 @@ These are small launcher scripts installed alongside `claude-mprocs`:
 
 Claude Code sets `CLAUDECODE=1` in its environment, which prevents launching nested instances. When `cm start` is invoked from within a Claude Code session, it temporarily clears this variable from the tmux environment so child processes can launch Claude Code independently.
 
+## Recommended tmux settings
+
+Add these to your `~/.tmux.conf` for a better experience:
+
+```bash
+# Enable mouse scrolling, pane selection, and window resizing
+set -g mouse on
+
+# Enable extended key sequences (better key handling in apps like vim/neovim)
+set -s extended-keys on
+```
+
+- **`mouse on`** — lets you scroll through Claude output history, click to select panes, and drag to resize them — all without keyboard shortcuts
+- **`extended-keys on`** — ensures modifier key combinations (e.g. `Ctrl+Shift+...`) are passed through correctly to programs running inside tmux
+
 ## Troubleshooting
 
 **"Session already running"** — Run `cm q` to stop the existing session, or `cm a` to attach to it.
